@@ -29,7 +29,8 @@ namespace interpreter {
 class InterpreterCompilationJob final : public CompilationJob {
  public:
   InterpreterCompilationJob(ParseInfo* parse_info, FunctionLiteral* literal,
-                            AccountingAllocator* allocator);
+                            AccountingAllocator* allocator,
+                            ZoneVector<FunctionLiteral*>* eager_inner_literals);
 
  protected:
   Status PrepareJobImpl(Isolate* isolate) final;
@@ -163,12 +164,14 @@ bool ShouldPrintBytecode(Handle<SharedFunctionInfo> shared) {
 
 InterpreterCompilationJob::InterpreterCompilationJob(
     ParseInfo* parse_info, FunctionLiteral* literal,
-    AccountingAllocator* allocator)
+    AccountingAllocator* allocator,
+    ZoneVector<FunctionLiteral*>* eager_inner_literals)
     : CompilationJob(parse_info->stack_limit(), parse_info, &compilation_info_,
                      "Ignition", State::kReadyToExecute),
       zone_(allocator, ZONE_NAME),
       compilation_info_(&zone_, parse_info, literal),
-      generator_(&compilation_info_, parse_info->ast_string_constants()) {}
+      generator_(&compilation_info_, parse_info->ast_string_constants(),
+                 eager_inner_literals) {}
 
 InterpreterCompilationJob::Status InterpreterCompilationJob::PrepareJobImpl(
     Isolate* isolate) {
@@ -180,8 +183,8 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::ExecuteJobImpl() {
   RuntimeCallTimerScope runtimeTimerScope(
       parse_info()->runtime_call_stats(),
       parse_info()->on_background_thread()
-          ? &RuntimeCallStats::CompileBackgroundIgnition
-          : &RuntimeCallStats::CompileIgnition);
+          ? RuntimeCallCounterId::kCompileBackgroundIgnition
+          : RuntimeCallCounterId::kCompileIgnition);
   // TODO(lpy): add support for background compilation RCS trace.
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"), "V8.CompileIgnition");
 
@@ -201,7 +204,7 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::FinalizeJobImpl(
     Isolate* isolate) {
   RuntimeCallTimerScope runtimeTimerScope(
       parse_info()->runtime_call_stats(),
-      &RuntimeCallStats::CompileIgnitionFinalization);
+      RuntimeCallCounterId::kCompileIgnitionFinalization);
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                "V8.CompileIgnitionFinalization");
 
@@ -226,10 +229,12 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::FinalizeJobImpl(
   return SUCCEEDED;
 }
 
-CompilationJob* Interpreter::NewCompilationJob(ParseInfo* parse_info,
-                                               FunctionLiteral* literal,
-                                               AccountingAllocator* allocator) {
-  return new InterpreterCompilationJob(parse_info, literal, allocator);
+CompilationJob* Interpreter::NewCompilationJob(
+    ParseInfo* parse_info, FunctionLiteral* literal,
+    AccountingAllocator* allocator,
+    ZoneVector<FunctionLiteral*>* eager_inner_literals) {
+  return new InterpreterCompilationJob(parse_info, literal, allocator,
+                                       eager_inner_literals);
 }
 
 bool Interpreter::IsDispatchTableInitialized() const {

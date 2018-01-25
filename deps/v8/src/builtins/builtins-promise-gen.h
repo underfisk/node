@@ -111,9 +111,6 @@ class PromiseBuiltinsAssembler : public CodeStubAssembler {
  protected:
   void PromiseInit(Node* promise);
 
-  Node* SpeciesConstructor(Node* context, Node* object,
-                           Node* default_constructor);
-
   void PromiseSetHasHandler(Node* promise);
   void PromiseSetHandledHint(Node* promise);
 
@@ -137,7 +134,6 @@ class PromiseBuiltinsAssembler : public CodeStubAssembler {
   void BranchIfFastPath(Node* native_context, Node* promise_fun, Node* promise,
                         Label* if_isunmodified, Label* if_ismodified);
 
-  void InitializeFunctionContext(Node* native_context, Node* context, int len);
   Node* CreatePromiseContext(Node* native_context, int slots);
   void PromiseFulfill(Node* context, Node* promise, Node* result,
                       v8::Promise::PromiseState status);
@@ -158,7 +154,7 @@ class PromiseBuiltinsAssembler : public CodeStubAssembler {
   Node* CreateThrowerFunction(Node* reason, Node* native_context);
 
   Node* PerformPromiseAll(Node* context, Node* constructor, Node* capability,
-                          Node* iterator, Label* if_exception,
+                          const IteratorRecord& record, Label* if_exception,
                           Variable* var_exception);
 
   Node* IncrementSmiCell(Node* cell, Label* if_overflow = nullptr);

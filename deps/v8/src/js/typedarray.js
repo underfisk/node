@@ -15,10 +15,6 @@
 var ArrayToString = utils.ImportNow("ArrayToString");
 var GetIterator;
 var GetMethod;
-var GlobalArray = global.Array;
-var GlobalArrayBuffer = global.ArrayBuffer;
-var GlobalArrayBufferPrototype = GlobalArrayBuffer.prototype;
-var GlobalObject = global.Object;
 var InnerArrayJoin;
 var InnerArraySort;
 var InnerArrayToLocaleString;
@@ -27,7 +23,6 @@ var MathMax = global.Math.max;
 var MathMin = global.Math.min;
 var iteratorSymbol = utils.ImportNow("iterator_symbol");
 var speciesSymbol = utils.ImportNow("species_symbol");
-var toStringTagSymbol = utils.ImportNow("to_string_tag_symbol");
 
 macro TYPED_ARRAYS(FUNCTION)
 FUNCTION(Uint8Array, 1)
@@ -46,14 +41,6 @@ var GlobalNAME = global.NAME;
 endmacro
 
 TYPED_ARRAYS(DECLARE_GLOBALS)
-
-macro IS_ARRAYBUFFER(arg)
-(%_ClassOf(arg) === 'ArrayBuffer')
-endmacro
-
-macro IS_SHAREDARRAYBUFFER(arg)
-(%_ClassOf(arg) === 'SharedArrayBuffer')
-endmacro
 
 macro IS_TYPEDARRAY(arg)
 (%_IsTypedArray(arg))
@@ -131,13 +118,12 @@ function TypedArraySpeciesCreate(exemplar, arg0, arg1, arg2) {
   return TypedArrayCreate(constructor, arg0, arg1, arg2);
 }
 
-macro TYPED_ARRAY_CONSTRUCTOR(NAME, ELEMENT_SIZE)
-function NAMEConstructByIterable(obj, iterable, iteratorFn) {
+function TypedArrayConstructByIterable(obj, iterable, iteratorFn, elementSize) {
   if (%IterableToListCanBeElided(iterable)) {
     // This .length access is unobservable, because it being observable would
     // mean that iteration has side effects, and we wouldn't reach this path.
     %typed_array_construct_by_array_like(
-        obj, iterable, iterable.length, ELEMENT_SIZE);
+        obj, iterable, iterable.length, elementSize);
   } else {
     var list = new InternalArray();
     // Reading the Symbol.iterator property of iterable twice would be
@@ -155,105 +141,9 @@ function NAMEConstructByIterable(obj, iterable, iteratorFn) {
     for (var value of newIterable) {
       list.push(value);
     }
-    %typed_array_construct_by_array_like(obj, list, list.length, ELEMENT_SIZE);
+    %typed_array_construct_by_array_like(obj, list, list.length, elementSize);
   }
 }
-
-// ES#sec-typedarray-typedarray TypedArray ( typedArray )
-function NAMEConstructByTypedArray(obj, typedArray) {
-  // TODO(littledan): Throw on detached typedArray
-  var srcData = %TypedArrayGetBuffer(typedArray);
-  var length = %_TypedArrayGetLength(typedArray);
-  var byteLength = %_ArrayBufferViewGetByteLength(typedArray);
-  var newByteLength = length * ELEMENT_SIZE;
-  %typed_array_construct_by_array_like(obj, typedArray, length, ELEMENT_SIZE);
-  // The spec requires that constructing a typed array using a SAB-backed typed
-  // array use the ArrayBuffer constructor, not the species constructor. See
-  // https://tc39.github.io/ecma262/#sec-typedarray-typedarray.
-  var bufferConstructor = IS_SHAREDARRAYBUFFER(srcData)
-                            ? GlobalArrayBuffer
-                            : SpeciesConstructor(srcData, GlobalArrayBuffer);
-  var prototype = bufferConstructor.prototype;
-  // TODO(littledan): Use the right prototype based on bufferConstructor's realm
-  if (IS_RECEIVER(prototype) && prototype !== GlobalArrayBufferPrototype) {
-    %InternalSetPrototype(%TypedArrayGetBuffer(obj), prototype);
-  }
-}
-
-function NAMEConstructor(arg1, arg2, arg3) {
-  if (!IS_UNDEFINED(new.target)) {
-    if (IS_ARRAYBUFFER(arg1) || IS_SHAREDARRAYBUFFER(arg1)) {
-      %typed_array_construct_by_array_buffer(
-          this, arg1, arg2, arg3, ELEMENT_SIZE);
-    } else if (IS_TYPEDARRAY(arg1)) {
-      NAMEConstructByTypedArray(this, arg1);
-    } else if (IS_RECEIVER(arg1)) {
-      var iteratorFn = arg1[iteratorSymbol];
-      if (IS_UNDEFINED(iteratorFn)) {
-        %typed_array_construct_by_array_like(
-            this, arg1, arg1.length, ELEMENT_SIZE);
-      } else {
-        NAMEConstructByIterable(this, arg1, iteratorFn);
-      }
-    } else {
-      %typed_array_construct_by_length(this, arg1, ELEMENT_SIZE);
-    }
-  } else {
-    throw %make_type_error(kConstructorNotFunction, "NAME")
-  }
-}
-
-function NAMESubArray(begin, end) {
-  var beginInt = TO_INTEGER(begin);
-  if (!IS_UNDEFINED(end)) {
-    var endInt = TO_INTEGER(end);
-    var srcLength = %_TypedArrayGetLength(this);
-  } else {
-    var srcLength = %_TypedArrayGetLength(this);
-    var endInt = srcLength;
-  }
-
-  if (beginInt < 0) {
-    beginInt = MathMax(0, srcLength + beginInt);
-  } else {
-    beginInt = MathMin(beginInt, srcLength);
-  }
-
-  if (endInt < 0) {
-    endInt = MathMax(0, srcLength + endInt);
-  } else {
-    endInt = MathMin(endInt, srcLength);
-  }
-
-  if (endInt < beginInt) {
-    endInt = beginInt;
-  }
-
-  var newLength = endInt - beginInt;
-  var beginByteOffset =
-      %_ArrayBufferViewGetByteOffset(this) + beginInt * ELEMENT_SIZE;
-  return TypedArraySpeciesCreate(this, %TypedArrayGetBuffer(this),
-                                 beginByteOffset, newLength);
-}
-endmacro
-
-TYPED_ARRAYS(TYPED_ARRAY_CONSTRUCTOR)
-
-DEFINE_METHOD(
-  GlobalTypedArray.prototype,
-  subarray(begin, end) {
-    switch (%_ClassOf(this)) {
-macro TYPED_ARRAY_SUBARRAY_CASE(NAME, ELEMENT_SIZE)
-      case "NAME":
-        return %_Call(NAMESubArray, this, begin, end);
-endmacro
-TYPED_ARRAYS(TYPED_ARRAY_SUBARRAY_CASE)
-    }
-    throw %make_type_error(kIncompatibleMethodReceiver,
-                        "get %TypedArray%.prototype.subarray", this);
-  }
-);
-
 
 // The following functions cannot be made efficient on sparse arrays while
 // preserving the semantics, since the calls to the receiver function can add
@@ -417,11 +307,8 @@ function TypedArrayConstructor() {
 %AddNamedProperty(GlobalTypedArray.prototype, "toString", ArrayToString,
                   DONT_ENUM);
 
-
-macro SETUP_TYPED_ARRAY(NAME, ELEMENT_SIZE)
-  %SetCode(GlobalNAME, NAMEConstructor);
-endmacro
-
-TYPED_ARRAYS(SETUP_TYPED_ARRAY)
+%InstallToContext([
+  "typed_array_construct_by_iterable", TypedArrayConstructByIterable
+]);
 
 })

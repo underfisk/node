@@ -238,6 +238,7 @@ int ToNumber(Register reg);
 
 Register ToRegister(int num);
 
+constexpr bool kPadArguments = false;
 constexpr bool kSimpleFPAliasing = true;
 constexpr bool kSimdMaskRegisters = false;
 
@@ -387,7 +388,7 @@ class Operand BASE_EMBEDDED {
  public:
   // Immediate.
   INLINE(explicit Operand(int32_t immediate,
-                          RelocInfo::Mode rmode = RelocInfo::NONE32))
+                          RelocInfo::Mode rmode = RelocInfo::NONE))
       : rm_(no_reg), rmode_(rmode) {
     value_.immediate = immediate;
   }
@@ -399,8 +400,7 @@ class Operand BASE_EMBEDDED {
   INLINE(explicit Operand(Object** opp));
   INLINE(explicit Operand(Context** cpp));
   explicit Operand(Handle<HeapObject> handle);
-  INLINE(explicit Operand(Smi* value))
-      : rm_(no_reg), rmode_(RelocInfo::NONE32) {
+  INLINE(explicit Operand(Smi* value)) : rm_(no_reg), rmode_(RelocInfo::NONE) {
     value_.immediate = reinterpret_cast<intptr_t>(value);
   }
 
@@ -581,10 +581,6 @@ class Assembler : public AssemblerBase {
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED)) {
     set_target_address_at(isolate, pc, target, icache_flush_mode);
   }
-  INLINE(static Address target_address_at(Address pc, Code* code));
-  INLINE(static void set_target_address_at(
-      Isolate* isolate, Address pc, Code* code, Address target,
-      ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED));
 
   static void set_target_value_at(
       Isolate* isolate, Address pc, uint32_t target,

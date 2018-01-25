@@ -145,6 +145,8 @@ Reduction JSCreateLowering::Reduce(Node* node) {
       return ReduceJSCreateIterResultObject(node);
     case IrOpcode::kJSCreateKeyValueArray:
       return ReduceJSCreateKeyValueArray(node);
+    case IrOpcode::kJSCreatePromise:
+      return ReduceJSCreatePromise(node);
     case IrOpcode::kJSCreateLiteralArray:
     case IrOpcode::kJSCreateLiteralObject:
       return ReduceJSCreateLiteralArrayOrObject(node);
@@ -525,7 +527,7 @@ Reduction JSCreateLowering::ReduceNewArray(Node* node, Node* length,
   // This has to be kept in sync with src/runtime/runtime-array.cc,
   // where this limit is protected.
   length = effect = graph()->NewNode(
-      simplified()->CheckBounds(), length,
+      simplified()->CheckBounds(VectorSlotPair()), length,
       jsgraph()->Constant(JSArray::kInitialMaxFastElementArray), effect,
       control);
 
@@ -617,15 +619,16 @@ Reduction JSCreateLowering::ReduceNewArray(Node* node,
   if (IsSmiElementsKind(elements_kind)) {
     for (auto& value : values) {
       if (!NodeProperties::GetType(value)->Is(Type::SignedSmall())) {
-        value = effect =
-            graph()->NewNode(simplified()->CheckSmi(), value, effect, control);
+        value = effect = graph()->NewNode(
+            simplified()->CheckSmi(VectorSlotPair()), value, effect, control);
       }
     }
   } else if (IsDoubleElementsKind(elements_kind)) {
     for (auto& value : values) {
       if (!NodeProperties::GetType(value)->Is(Type::Number())) {
-        value = effect = graph()->NewNode(simplified()->CheckNumber(), value,
-                                          effect, control);
+        value = effect =
+            graph()->NewNode(simplified()->CheckNumber(VectorSlotPair()), value,
+                             effect, control);
       }
       // Make sure we do not store signaling NaNs into double arrays.
       value = graph()->NewNode(simplified()->NumberSilenceNaN(), value);
@@ -913,6 +916,7 @@ Reduction JSCreateLowering::ReduceJSCreateClosure(Node* node) {
     DCHECK(!function_map->is_dictionary_map());
 
     // Emit code to allocate the JSFunction instance.
+    STATIC_ASSERT(JSFunction::kSizeWithoutPrototype == 7 * kPointerSize);
     AllocationBuilder a(jsgraph(), effect, control);
     a.Allocate(function_map->instance_size());
     a.Store(AccessBuilder::ForMap(), function_map);
@@ -980,9 +984,9 @@ Reduction JSCreateLowering::ReduceJSCreateKeyValueArray(Node* node) {
   AllocationBuilder aa(jsgraph(), effect, graph()->start());
   aa.AllocateArray(2, factory()->fixed_array_map());
   aa.Store(AccessBuilder::ForFixedArrayElement(PACKED_ELEMENTS),
-           jsgraph()->Constant(0), key);
+           jsgraph()->ZeroConstant(), key);
   aa.Store(AccessBuilder::ForFixedArrayElement(PACKED_ELEMENTS),
-           jsgraph()->Constant(1), value);
+           jsgraph()->OneConstant(), value);
   Node* elements = aa.Finish();
 
   AllocationBuilder a(jsgraph(), elements, graph()->start());
@@ -992,6 +996,44 @@ Reduction JSCreateLowering::ReduceJSCreateKeyValueArray(Node* node) {
   a.Store(AccessBuilder::ForJSObjectElements(), elements);
   a.Store(AccessBuilder::ForJSArrayLength(PACKED_ELEMENTS), length);
   STATIC_ASSERT(JSArray::kSize == 4 * kPointerSize);
+  a.FinishAndChange(node);
+  return Changed(node);
+}
+
+Reduction JSCreateLowering::ReduceJSCreatePromise(Node* node) {
+  DCHECK_EQ(IrOpcode::kJSCreatePromise, node->opcode());
+  Node* effect = NodeProperties::GetEffectInput(node);
+
+  Handle<Map> promise_map(native_context()->promise_function()->initial_map());
+
+  AllocationBuilder a(jsgraph(), effect, graph()->start());
+  a.Allocate(promise_map->instance_size());
+  a.Store(AccessBuilder::ForMap(), promise_map);
+  a.Store(AccessBuilder::ForJSObjectPropertiesOrHash(),
+          jsgraph()->EmptyFixedArrayConstant());
+  a.Store(AccessBuilder::ForJSObjectElements(),
+          jsgraph()->EmptyFixedArrayConstant());
+  a.Store(AccessBuilder::ForJSObjectOffset(JSPromise::kResultOffset),
+          jsgraph()->UndefinedConstant());
+  a.Store(AccessBuilder::ForJSObjectOffset(JSPromise::kDeferredPromiseOffset),
+          jsgraph()->UndefinedConstant());
+  a.Store(AccessBuilder::ForJSObjectOffset(JSPromise::kDeferredOnResolveOffset),
+          jsgraph()->UndefinedConstant());
+  a.Store(AccessBuilder::ForJSObjectOffset(JSPromise::kDeferredOnRejectOffset),
+          jsgraph()->UndefinedConstant());
+  a.Store(AccessBuilder::ForJSObjectOffset(JSPromise::kFulfillReactionsOffset),
+          jsgraph()->UndefinedConstant());
+  a.Store(AccessBuilder::ForJSObjectOffset(JSPromise::kRejectReactionsOffset),
+          jsgraph()->UndefinedConstant());
+  STATIC_ASSERT(v8::Promise::kPending == 0);
+  a.Store(AccessBuilder::ForJSObjectOffset(JSPromise::kFlagsOffset),
+          jsgraph()->ZeroConstant());
+  STATIC_ASSERT(JSPromise::kSize == 10 * kPointerSize);
+  for (int i = 0; i < v8::Promise::kEmbedderFieldCount; ++i) {
+    a.Store(
+        AccessBuilder::ForJSObjectOffset(JSPromise::kSize + i * kPointerSize),
+        jsgraph()->ZeroConstant());
+  }
   a.FinishAndChange(node);
   return Changed(node);
 }

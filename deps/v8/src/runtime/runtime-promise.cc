@@ -70,22 +70,6 @@ RUNTIME_FUNCTION(Runtime_PromiseRevokeReject) {
   return isolate->heap()->undefined_value();
 }
 
-RUNTIME_FUNCTION(Runtime_EnqueuePromiseReactionJob) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(1, args.length());
-  CONVERT_ARG_HANDLE_CHECKED(PromiseReactionJobInfo, info, 0);
-  isolate->EnqueueMicrotask(info);
-  return isolate->heap()->undefined_value();
-}
-
-RUNTIME_FUNCTION(Runtime_EnqueuePromiseResolveThenableJob) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(args.length(), 1);
-  CONVERT_ARG_HANDLE_CHECKED(PromiseResolveThenableJobInfo, info, 0);
-  isolate->EnqueueMicrotask(info);
-  return isolate->heap()->undefined_value();
-}
-
 RUNTIME_FUNCTION(Runtime_EnqueueMicrotask) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
@@ -147,6 +131,7 @@ RUNTIME_FUNCTION(Runtime_PromiseHookBefore) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(JSObject, promise, 0);
+  if (isolate->debug()->is_active()) isolate->PushPromise(promise);
   if (promise->IsJSPromise()) {
     isolate->RunPromiseHook(PromiseHookType::kBefore,
                             Handle<JSPromise>::cast(promise),
@@ -159,6 +144,7 @@ RUNTIME_FUNCTION(Runtime_PromiseHookAfter) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   CONVERT_ARG_HANDLE_CHECKED(JSObject, promise, 0);
+  if (isolate->debug()->is_active()) isolate->PopPromise();
   if (promise->IsJSPromise()) {
     isolate->RunPromiseHook(PromiseHookType::kAfter,
                             Handle<JSPromise>::cast(promise),

@@ -109,8 +109,7 @@ class Interpreter;
 }
 
 namespace wasm {
-class CompilationManager;
-class WasmCodeManager;
+class WasmEngine;
 }
 
 #define RETURN_FAILURE_IF_SCHEDULED_EXCEPTION(isolate) \
@@ -331,7 +330,7 @@ class ThreadLocalTop BASE_EMBEDDED {
   Object* pending_exception_;
   // TODO(kschimpf): Change this to a stack of caught exceptions (rather than
   // just innermost catching try block).
-  Object* wasm_caught_exception_;
+  Object* wasm_caught_exception_ = nullptr;
 
   // Communication channel between Isolate::FindHandler and the CEntryStub.
   Context* pending_handler_context_;
@@ -373,6 +372,9 @@ class ThreadLocalTop BASE_EMBEDDED {
   // Call back function to report unsafe JS accesses.
   v8::FailedAccessCheckCallback failed_access_check_callback_;
 
+  int microtask_queue_bailout_index_;
+  int microtask_queue_bailout_count_;
+
  private:
   void InitializeInternal();
 
@@ -382,10 +384,8 @@ class ThreadLocalTop BASE_EMBEDDED {
 
 #if USE_SIMULATOR
 
-#define ISOLATE_INIT_SIMULATOR_LIST(V)                       \
-  V(bool, simulator_initialized, false)                      \
-  V(base::CustomMatcherHashMap*, simulator_i_cache, nullptr) \
-  V(Redirection*, simulator_redirection, nullptr)
+#define ISOLATE_INIT_SIMULATOR_LIST(V)  \
+  V(base::CustomMatcherHashMap*, simulator_i_cache, nullptr)
 #else
 
 #define ISOLATE_INIT_SIMULATOR_LIST(V)
@@ -675,6 +675,18 @@ class Isolate {
     return &thread_local_top_.js_entry_sp_;
   }
 
+  THREAD_LOCAL_TOP_ACCESSOR(int, microtask_queue_bailout_index)
+  Address microtask_queue_bailout_index_address() {
+    return reinterpret_cast<Address>(
+        &thread_local_top_.microtask_queue_bailout_index_);
+  }
+
+  THREAD_LOCAL_TOP_ACCESSOR(int, microtask_queue_bailout_count)
+  Address microtask_queue_bailout_count_address() {
+    return reinterpret_cast<Address>(
+        &thread_local_top_.microtask_queue_bailout_count_);
+  }
+
   // Returns the global object of the current context. It could be
   // a builtin object, or a JS global object.
   inline Handle<JSGlobalObject> global_object();
@@ -808,6 +820,11 @@ class Isolate {
   // Un-schedule an exception that was caught by a TryCatch handler.
   void CancelScheduledExceptionFromTryCatch(v8::TryCatch* handler);
   void ReportPendingMessages();
+  void ReportPendingMessagesFromJavaScript();
+
+  // Implements code shared between the two above methods
+  void ReportPendingMessagesImpl(bool report_externally);
+
   // Return pending location if any or unfilled structure.
   MessageLocation GetMessageLocation();
 
@@ -906,7 +923,7 @@ class Isolate {
   }
   StackGuard* stack_guard() { return &stack_guard_; }
   Heap* heap() { return &heap_; }
-  V8_EXPORT_PRIVATE wasm::WasmCodeManager* wasm_code_manager();
+  wasm::WasmEngine* wasm_engine() const { return wasm_engine_.get(); }
   StubCache* load_stub_cache() { return load_stub_cache_; }
   StubCache* store_stub_cache() { return store_stub_cache_; }
   DeoptimizerData* deoptimizer_data() { return deoptimizer_data_; }
@@ -991,12 +1008,6 @@ class Isolate {
   static size_t non_disposed_isolates() {
     return non_disposed_isolates_.Value();
   }
-
-  HistogramInfo* heap_histograms() { return heap_histograms_; }
-
-  JSObject::SpillInformation* js_spill_information() {
-    return &js_spill_information_;
-  }
 #endif
 
   Factory* factory() { return reinterpret_cast<Factory*>(this); }
@@ -1065,7 +1076,7 @@ class Isolate {
   // memory usage is expected.
   void SetFeedbackVectorsForProfilingTools(Object* value);
 
-  void InitializeVectorListFromHeap();
+  void MaybeInitializeVectorListFromHeap();
 
   double time_millis_since_init() {
     return heap_.MonotonicallyIncreasingTimeInMs() - time_millis_at_init_;
@@ -1093,7 +1104,7 @@ class Isolate {
   bool IsNoElementsProtectorIntact(Context* context);
   bool IsNoElementsProtectorIntact();
 
-  inline bool IsArraySpeciesLookupChainIntact();
+  inline bool IsSpeciesLookupChainIntact();
   bool IsIsConcatSpreadableLookupChainIntact();
   bool IsIsConcatSpreadableLookupChainIntact(JSReceiver* receiver);
   inline bool IsStringLengthOverflowIntact();
@@ -1104,6 +1115,10 @@ class Isolate {
 
   // Make sure we do check for neutered array buffers.
   inline bool IsArrayBufferNeuteringIntact();
+
+  // Disable promise optimizations if promise (debug) hooks have ever been
+  // active.
+  bool IsPromiseHookProtectorIntact();
 
   // On intent to set an element in object, make sure that appropriate
   // notifications occur if the set is on the elements of the array or
@@ -1120,11 +1135,12 @@ class Isolate {
     UpdateNoElementsProtectorOnSetElement(object);
   }
   void InvalidateArrayConstructorProtector();
-  void InvalidateArraySpeciesProtector();
+  void InvalidateSpeciesProtector();
   void InvalidateIsConcatSpreadableProtector();
   void InvalidateStringLengthOverflowProtector();
   void InvalidateArrayIteratorProtector();
   void InvalidateArrayBufferNeuteringProtector();
+  void InvalidatePromiseHookProtector();
 
   // Returns true if array is the initial array prototype in any native context.
   bool IsAnyInitialArrayPrototype(Handle<JSArray> array);
@@ -1165,8 +1181,8 @@ class Isolate {
 
   void* stress_deopt_count_address() { return &stress_deopt_count_; }
 
-  bool force_slow_path() { return force_slow_path_; }
-
+  void set_force_slow_path(bool v) { force_slow_path_ = v; }
+  bool force_slow_path() const { return force_slow_path_; }
   bool* force_slow_path_address() { return &force_slow_path_; }
 
   V8_EXPORT_PRIVATE base::RandomNumberGenerator* random_number_generator();
@@ -1210,6 +1226,7 @@ class Isolate {
   void PromiseResolveThenableJob(Handle<PromiseResolveThenableJobInfo> info,
                                  MaybeHandle<Object>* result,
                                  MaybeHandle<Object>* maybe_exception);
+
   void EnqueueMicrotask(Handle<Object> microtask);
   void RunMicrotasks();
   bool IsRunningMicrotasks() const { return is_running_microtasks_; }
@@ -1231,6 +1248,14 @@ class Isolate {
 
   Address promise_hook_or_debug_is_active_address() {
     return reinterpret_cast<Address>(&promise_hook_or_debug_is_active_);
+  }
+
+  Address pending_microtask_count_address() {
+    return reinterpret_cast<Address>(&pending_microtask_count_);
+  }
+
+  Address handle_scope_implementer_address() {
+    return reinterpret_cast<Address>(&handle_scope_implementer_);
   }
 
   void DebugStateUpdated();
@@ -1257,10 +1282,6 @@ class Isolate {
 
   CancelableTaskManager* cancelable_task_manager() {
     return cancelable_task_manager_;
-  }
-
-  wasm::CompilationManager* wasm_compilation_manager() {
-    return wasm_compilation_manager_.get();
   }
 
   const AstStringConstants* ast_string_constants() const {
@@ -1303,9 +1324,6 @@ class Isolate {
 
 #ifdef USE_SIMULATOR
   base::Mutex* simulator_i_cache_mutex() { return &simulator_i_cache_mutex_; }
-  base::Mutex* simulator_redirection_mutex() {
-    return &simulator_redirection_mutex_;
-  }
 #endif
 
   void set_allow_atomics_wait(bool set) { allow_atomics_wait_ = set; }
@@ -1558,8 +1576,6 @@ class Isolate {
 #ifdef DEBUG
   static base::AtomicNumber<size_t> non_disposed_isolates_;
 
-  // A static array of histogram info for each type.
-  HistogramInfo heap_histograms_[LAST_TYPE + 1];
   JSObject::SpillInformation js_spill_information_;
 #endif
 
@@ -1634,8 +1650,6 @@ class Isolate {
 
   CancelableTaskManager* cancelable_task_manager_;
 
-  std::unique_ptr<wasm::CompilationManager> wasm_compilation_manager_;
-
   debug::ConsoleDelegate* console_delegate_ = nullptr;
 
   v8::Isolate::AbortOnUncaughtExceptionCallback
@@ -1643,7 +1657,6 @@ class Isolate {
 
 #ifdef USE_SIMULATOR
   base::Mutex simulator_i_cache_mutex_;
-  base::Mutex simulator_redirection_mutex_;
 #endif
 
   bool allow_atomics_wait_;
@@ -1654,7 +1667,7 @@ class Isolate {
 
   size_t elements_deletion_counter_ = 0;
 
-  std::unique_ptr<wasm::WasmCodeManager> wasm_code_manager_;
+  std::unique_ptr<wasm::WasmEngine> wasm_engine_;
 
   // The top entry of the v8::Context::BackupIncumbentScope stack.
   const v8::Context::BackupIncumbentScope* top_backup_incumbent_scope_ =

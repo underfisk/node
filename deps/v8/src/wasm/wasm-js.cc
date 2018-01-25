@@ -16,14 +16,11 @@
 #include "src/objects.h"
 #include "src/parsing/parse-info.h"
 #include "src/trap-handler/trap-handler.h"
-#include "src/wasm/module-compiler.h"
-#include "src/wasm/module-decoder.h"
 #include "src/wasm/wasm-api.h"
+#include "src/wasm/wasm-engine.h"
 #include "src/wasm/wasm-limits.h"
 #include "src/wasm/wasm-memory.h"
-#include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-objects-inl.h"
-#include "src/wasm/wasm-result.h"
 
 using v8::internal::wasm::ErrorThrower;
 
@@ -63,7 +60,8 @@ i::MaybeHandle<i::WasmModuleObject> GetFirstArgumentAsModule(
 }
 
 i::wasm::ModuleWireBytes GetFirstArgumentAsBytes(
-    const v8::FunctionCallbackInfo<v8::Value>& args, ErrorThrower* thrower) {
+    const v8::FunctionCallbackInfo<v8::Value>& args, ErrorThrower* thrower,
+    bool* is_shared) {
   const uint8_t* start = nullptr;
   size_t length = 0;
   v8::Local<v8::Value> source = args[0];
@@ -74,6 +72,7 @@ i::wasm::ModuleWireBytes GetFirstArgumentAsBytes(
 
     start = reinterpret_cast<const uint8_t*>(contents.Data());
     length = contents.ByteLength();
+    *is_shared = buffer->IsSharedArrayBuffer();
   } else if (source->IsTypedArray()) {
     // A TypedArray was passed.
     Local<TypedArray> array = Local<TypedArray>::Cast(source);
@@ -84,6 +83,7 @@ i::wasm::ModuleWireBytes GetFirstArgumentAsBytes(
     start =
         reinterpret_cast<const uint8_t*>(contents.Data()) + array->ByteOffset();
     length = array->ByteLength();
+    *is_shared = buffer->IsSharedArrayBuffer();
   } else {
     thrower->TypeError("Argument 0 must be a buffer source");
   }
@@ -154,7 +154,8 @@ void WebAssemblyCompile(const v8::FunctionCallbackInfo<v8::Value>& args) {
   v8::ReturnValue<v8::Value> return_value = args.GetReturnValue();
   return_value.Set(resolver->GetPromise());
 
-  auto bytes = GetFirstArgumentAsBytes(args, &thrower);
+  bool is_shared = false;
+  auto bytes = GetFirstArgumentAsBytes(args, &thrower, &is_shared);
   if (thrower.error()) {
     auto maybe = resolver->Reject(context, Utils::ToLocal(thrower.Reify()));
     CHECK_IMPLIES(!maybe.FromMaybe(false),
@@ -162,7 +163,8 @@ void WebAssemblyCompile(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
   i::Handle<i::JSPromise> promise = Utils::OpenHandle(*resolver->GetPromise());
-  i::wasm::AsyncCompile(i_isolate, promise, bytes);
+  // Asynchronous compilation handles copying wire bytes if necessary.
+  i_isolate->wasm_engine()->AsyncCompile(i_isolate, promise, bytes, is_shared);
 }
 
 // WebAssembly.validate(bytes) -> bool
@@ -172,16 +174,31 @@ void WebAssemblyValidate(const v8::FunctionCallbackInfo<v8::Value>& args) {
   HandleScope scope(isolate);
   i::wasm::ScheduledErrorThrower thrower(i_isolate, "WebAssembly.validate()");
 
-  auto bytes = GetFirstArgumentAsBytes(args, &thrower);
+  bool is_shared = false;
+  auto bytes = GetFirstArgumentAsBytes(args, &thrower, &is_shared);
 
   v8::ReturnValue<v8::Value> return_value = args.GetReturnValue();
-  if (!thrower.error() &&
-      i::wasm::SyncValidate(reinterpret_cast<i::Isolate*>(isolate), bytes)) {
-    return_value.Set(v8::True(isolate));
-  } else {
+
+  if (thrower.error()) {
     if (thrower.wasm_error()) thrower.Reset();  // Clear error.
     return_value.Set(v8::False(isolate));
+    return;
   }
+
+  bool validated = false;
+  if (is_shared) {
+    // Make a copy of the wire bytes to avoid concurrent modification.
+    std::unique_ptr<uint8_t[]> copy(new uint8_t[bytes.length()]);
+    memcpy(copy.get(), bytes.start(), bytes.length());
+    i::wasm::ModuleWireBytes bytes_copy(copy.get(),
+                                        copy.get() + bytes.length());
+    validated = i_isolate->wasm_engine()->SyncValidate(i_isolate, bytes_copy);
+  } else {
+    // The wire bytes are not shared, OK to use them directly.
+    validated = i_isolate->wasm_engine()->SyncValidate(i_isolate, bytes);
+  }
+
+  return_value.Set(Boolean::New(isolate, validated));
 }
 
 // new WebAssembly.Module(bytes) -> WebAssembly.Module
@@ -202,13 +219,27 @@ void WebAssemblyModule(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
 
-  auto bytes = GetFirstArgumentAsBytes(args, &thrower);
+  bool is_shared = false;
+  auto bytes = GetFirstArgumentAsBytes(args, &thrower, &is_shared);
 
   if (thrower.error()) {
     return;
   }
-  i::MaybeHandle<i::Object> module_obj =
-      i::wasm::SyncCompile(i_isolate, &thrower, bytes);
+  i::MaybeHandle<i::Object> module_obj;
+  if (is_shared) {
+    // Make a copy of the wire bytes to avoid concurrent modification.
+    std::unique_ptr<uint8_t[]> copy(new uint8_t[bytes.length()]);
+    memcpy(copy.get(), bytes.start(), bytes.length());
+    i::wasm::ModuleWireBytes bytes_copy(copy.get(),
+                                        copy.get() + bytes.length());
+    module_obj =
+        i_isolate->wasm_engine()->SyncCompile(i_isolate, &thrower, bytes_copy);
+  } else {
+    // The wire bytes are not shared, OK to use them directly.
+    module_obj =
+        i_isolate->wasm_engine()->SyncCompile(i_isolate, &thrower, bytes);
+  }
+
   if (module_obj.is_null()) return;
 
   v8::ReturnValue<v8::Value> return_value = args.GetReturnValue();
@@ -282,9 +313,9 @@ MaybeLocal<Value> WebAssemblyInstantiateImpl(Isolate* isolate,
     i::Handle<i::WasmModuleObject> module_obj =
         i::Handle<i::WasmModuleObject>::cast(
             Utils::OpenHandle(Object::Cast(*module)));
-    instance_object =
-        i::wasm::SyncInstantiate(i_isolate, &thrower, module_obj, maybe_imports,
-                                 i::MaybeHandle<i::JSArrayBuffer>());
+    instance_object = i_isolate->wasm_engine()->SyncInstantiate(
+        i_isolate, &thrower, module_obj, maybe_imports,
+        i::MaybeHandle<i::JSArrayBuffer>());
   }
 
   DCHECK_EQ(instance_object.is_null(), i_isolate->has_scheduled_exception());
@@ -598,10 +629,12 @@ void WebAssemblyMemory(const v8::FunctionCallbackInfo<v8::Value>& args) {
     }
   }
 
-  size_t size = static_cast<size_t>(i::wasm::WasmModule::kPageSize) *
+  size_t size = static_cast<size_t>(i::wasm::kWasmPageSize) *
                 static_cast<size_t>(initial);
+  const bool enable_guard_regions =
+      internal::trap_handler::IsTrapHandlerEnabled();
   i::Handle<i::JSArrayBuffer> buffer = i::wasm::NewArrayBuffer(
-      i_isolate, size, internal::trap_handler::UseTrapHandler(),
+      i_isolate, size, enable_guard_regions,
       is_shared_memory ? i::SharedFlag::kShared : i::SharedFlag::kNotShared);
   if (buffer.is_null()) {
     thrower.RangeError("could not allocate memory");
@@ -751,7 +784,20 @@ void WebAssemblyTableSet(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
 
-  i::WasmTableObject::Set(i_isolate, receiver, static_cast<int32_t>(index),
+  // TODO(v8:7232) Allow reset/mutation after addressing referenced issue.
+  int32_t int_index = static_cast<int32_t>(index);
+  if (receiver->functions()->get(int_index) !=
+          i_isolate->heap()->undefined_value() &&
+      receiver->functions()->get(int_index) !=
+          i_isolate->heap()->null_value()) {
+    for (i::StackFrameIterator it(i_isolate); !it.done(); it.Advance()) {
+      if (it.frame()->type() == i::StackFrame::WASM_TO_JS) {
+        thrower.RangeError("Modifying existing entry in table not supported.");
+        return;
+      }
+    }
+  }
+  i::WasmTableObject::Set(i_isolate, receiver, static_cast<int32_t>(int_index),
                           value->IsNull(i_isolate)
                               ? i::Handle<i::JSFunction>::null()
                               : i::Handle<i::JSFunction>::cast(value));
@@ -781,7 +827,7 @@ void WebAssemblyMemoryGrow(const v8::FunctionCallbackInfo<v8::Value>& args) {
     return;
   }
   uint32_t old_size =
-      old_buffer->byte_length()->Number() / i::wasm::kSpecMaxWasmMemoryPages;
+      old_buffer->byte_length()->Number() / i::wasm::kWasmPageSize;
   int64_t new_size64 = old_size + delta_size;
   if (delta_size < 0 || max_size64 < new_size64 || new_size64 < old_size) {
     thrower.RangeError(new_size64 < old_size ? "trying to shrink memory"
@@ -793,18 +839,6 @@ void WebAssemblyMemoryGrow(const v8::FunctionCallbackInfo<v8::Value>& args) {
   if (ret == -1) {
     thrower.RangeError("Unable to grow instance memory.");
     return;
-  }
-  if (!old_buffer->is_shared()) {
-    // When delta_size == 0, or guard pages are enabled, the same backing store
-    // is used. To be spec compliant, the buffer associated with the memory
-    // object needs to be detached. Setup a new buffer with the same backing
-    // store, detach the old buffer, and do not free backing store memory.
-    bool free_memory = delta_size != 0 && !old_buffer->has_guard_region();
-    if ((!free_memory && old_size != 0) || new_size64 == 0) {
-      i::WasmMemoryObject::SetupNewBufferWithSameBackingStore(
-          i_isolate, receiver, static_cast<uint32_t>(new_size64));
-    }
-    i::wasm::DetachMemoryBuffer(i_isolate, old_buffer, free_memory);
   }
   v8::ReturnValue<v8::Value> return_value = args.GetReturnValue();
   return_value.Set(ret);

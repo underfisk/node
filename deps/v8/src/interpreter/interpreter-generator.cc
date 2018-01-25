@@ -158,68 +158,29 @@ class InterpreterLoadGlobalAssembler : public InterpreterAssembler {
 
   void LdaGlobal(int slot_operand_index, int name_operand_index,
                  TypeofMode typeof_mode) {
-    // Must be kept in sync with AccessorAssembler::LoadGlobalIC.
-
-    // Load the global via the LoadGlobalIC.
-    Node* feedback_vector = LoadFeedbackVector();
+    TNode<FeedbackVector> feedback_vector = CAST(LoadFeedbackVector());
     Node* feedback_slot = BytecodeOperandIdx(slot_operand_index);
 
     AccessorAssembler accessor_asm(state());
+    Label done(this);
+    Variable var_result(this, MachineRepresentation::kTagged);
+    ExitPoint exit_point(this, &done, &var_result);
 
-    Label try_handler(this, Label::kDeferred), miss(this, Label::kDeferred);
+    LazyNode<Context> lazy_context = [=] { return CAST(GetContext()); };
 
-    // Fast path without frame construction for the data case.
-    {
-      Label done(this);
-      Variable var_result(this, MachineRepresentation::kTagged);
-      ExitPoint exit_point(this, &done, &var_result);
+    LazyNode<Name> lazy_name = [=] {
+      Node* name_index = BytecodeOperandIdx(name_operand_index);
+      Node* name = LoadConstantPoolEntry(name_index);
+      return CAST(name);
+    };
 
-      accessor_asm.LoadGlobalIC_TryPropertyCellCase(
-          feedback_vector, feedback_slot, &exit_point, &try_handler, &miss,
-          CodeStubAssembler::INTPTR_PARAMETERS);
+    accessor_asm.LoadGlobalIC(feedback_vector, feedback_slot, lazy_context,
+                              lazy_name, typeof_mode, &exit_point,
+                              CodeStubAssembler::INTPTR_PARAMETERS);
 
-      BIND(&done);
-      SetAccumulator(var_result.value());
-      Dispatch();
-    }
-
-    // Slow path with frame construction.
-    {
-      Label done(this);
-      Variable var_result(this, MachineRepresentation::kTagged);
-      ExitPoint exit_point(this, &done, &var_result);
-
-      BIND(&try_handler);
-      {
-        Node* context = GetContext();
-        Node* smi_slot = SmiTag(feedback_slot);
-        Node* name_index = BytecodeOperandIdx(name_operand_index);
-        Node* name = LoadConstantPoolEntry(name_index);
-
-        AccessorAssembler::LoadICParameters params(context, nullptr, name,
-                                                   smi_slot, feedback_vector);
-        accessor_asm.LoadGlobalIC_TryHandlerCase(&params, typeof_mode,
-                                                 &exit_point, &miss);
-      }
-
-      BIND(&miss);
-      {
-        Node* context = GetContext();
-        Node* smi_slot = SmiTag(feedback_slot);
-        Node* name_index = BytecodeOperandIdx(name_operand_index);
-        Node* name = LoadConstantPoolEntry(name_index);
-
-        AccessorAssembler::LoadICParameters params(context, nullptr, name,
-                                                   smi_slot, feedback_vector);
-        accessor_asm.LoadGlobalIC_MissCase(&params, &exit_point);
-      }
-
-      BIND(&done);
-      {
-        SetAccumulator(var_result.value());
-        Dispatch();
-      }
-    }
+    BIND(&done);
+    SetAccumulator(var_result.value());
+    Dispatch();
   }
 };
 
@@ -245,50 +206,23 @@ IGNITION_HANDLER(LdaGlobalInsideTypeof, InterpreterLoadGlobalAssembler) {
   LdaGlobal(kSlotOperandIndex, kNameOperandIndex, INSIDE_TYPEOF);
 }
 
-class InterpreterStoreGlobalAssembler : public InterpreterAssembler {
- public:
-  InterpreterStoreGlobalAssembler(CodeAssemblerState* state, Bytecode bytecode,
-                                  OperandScale operand_scale)
-      : InterpreterAssembler(state, bytecode, operand_scale) {}
-
-  void StaGlobal(Callable ic) {
-    // Get the global object.
-    Node* context = GetContext();
-    Node* native_context = LoadNativeContext(context);
-    Node* global = LoadContextElement(native_context, Context::EXTENSION_INDEX);
-
-    // Store the global via the StoreIC.
-    Node* code_target = HeapConstant(ic.code());
-    Node* constant_index = BytecodeOperandIdx(0);
-    Node* name = LoadConstantPoolEntry(constant_index);
-    Node* value = GetAccumulator();
-    Node* raw_slot = BytecodeOperandIdx(1);
-    Node* smi_slot = SmiTag(raw_slot);
-    Node* feedback_vector = LoadFeedbackVector();
-    CallStub(ic.descriptor(), code_target, context, global, name, value,
-             smi_slot, feedback_vector);
-    Dispatch();
-  }
-};
-
-// StaGlobalSloppy <name_index> <slot>
+// StaGlobal <name_index> <slot>
 //
 // Store the value in the accumulator into the global with name in constant pool
-// entry <name_index> using FeedBackVector slot <slot> in sloppy mode.
-IGNITION_HANDLER(StaGlobalSloppy, InterpreterStoreGlobalAssembler) {
-  Callable ic = CodeFactory::StoreGlobalICInOptimizedCode(
-      isolate(), LanguageMode::kSloppy);
-  StaGlobal(ic);
-}
+// entry <name_index> using FeedBackVector slot <slot>.
+IGNITION_HANDLER(StaGlobal, InterpreterAssembler) {
+  Node* context = GetContext();
 
-// StaGlobalStrict <name_index> <slot>
-//
-// Store the value in the accumulator into the global with name in constant pool
-// entry <name_index> using FeedBackVector slot <slot> in strict mode.
-IGNITION_HANDLER(StaGlobalStrict, InterpreterStoreGlobalAssembler) {
-  Callable ic = CodeFactory::StoreGlobalICInOptimizedCode(
-      isolate(), LanguageMode::kStrict);
-  StaGlobal(ic);
+  // Store the global via the StoreGlobalIC.
+  Node* constant_index = BytecodeOperandIdx(0);
+  Node* name = LoadConstantPoolEntry(constant_index);
+  Node* value = GetAccumulator();
+  Node* raw_slot = BytecodeOperandIdx(1);
+  Node* smi_slot = SmiTag(raw_slot);
+  Node* feedback_vector = LoadFeedbackVector();
+  Callable ic = Builtins::CallableFor(isolate(), Builtins::kStoreGlobalIC);
+  CallStub(ic, context, name, value, smi_slot, feedback_vector);
+  Dispatch();
 }
 
 // LdaContextSlot <context> <slot_index> <depth>
@@ -802,7 +736,7 @@ IGNITION_HANDLER(StaModuleVariable, InterpreterAssembler) {
   BIND(&if_import);
   {
     // Not supported (probably never).
-    Abort(kUnsupportedModuleOperation);
+    Abort(AbortReason::kUnsupportedModuleOperation);
     Goto(&end);
   }
 
@@ -1245,8 +1179,7 @@ class UnaryNumericOpAssembler : public InterpreterAssembler {
       BIND(&if_bigint);
       {
         var_result.Bind(BigIntOp(value));
-        CombineFeedback(&var_feedback,
-                        SmiConstant(BinaryOperationFeedback::kBigInt));
+        CombineFeedback(&var_feedback, BinaryOperationFeedback::kBigInt);
         Goto(&end);
       }
 
@@ -1257,8 +1190,8 @@ class UnaryNumericOpAssembler : public InterpreterAssembler {
         // only reach this path on the first pass when the feedback is kNone.
         CSA_ASSERT(this, SmiEqual(var_feedback.value(),
                                   SmiConstant(BinaryOperationFeedback::kNone)));
-        var_feedback.Bind(
-            SmiConstant(BinaryOperationFeedback::kNumberOrOddball));
+        OverwriteFeedback(&var_feedback,
+                          BinaryOperationFeedback::kNumberOrOddball);
         var_value.Bind(LoadObjectField(value, Oddball::kToNumberOffset));
         Goto(&start);
       }
@@ -1270,7 +1203,7 @@ class UnaryNumericOpAssembler : public InterpreterAssembler {
         // only reach this path on the first pass when the feedback is kNone.
         CSA_ASSERT(this, SmiEqual(var_feedback.value(),
                                   SmiConstant(BinaryOperationFeedback::kNone)));
-        var_feedback.Bind(SmiConstant(BinaryOperationFeedback::kAny));
+        OverwriteFeedback(&var_feedback, BinaryOperationFeedback::kAny);
         var_value.Bind(
             CallBuiltin(Builtins::kNonNumberToNumeric, GetContext(), value));
         Goto(&start);
@@ -1279,8 +1212,7 @@ class UnaryNumericOpAssembler : public InterpreterAssembler {
 
     BIND(&do_float_op);
     {
-      CombineFeedback(&var_feedback,
-                      SmiConstant(BinaryOperationFeedback::kNumber));
+      CombineFeedback(&var_feedback, BinaryOperationFeedback::kNumber);
       var_result.Bind(
           AllocateHeapNumberWithValue(FloatOp(var_float_value.value())));
       Goto(&end);
@@ -1310,14 +1242,12 @@ class NegateAssemblerImpl : public UnaryNumericOpAssembler {
     GotoIf(SmiEqual(smi_value, SmiConstant(Smi::kMinValue)), &if_min_smi);
 
     // Else simply subtract operand from 0.
-    CombineFeedback(var_feedback,
-                    SmiConstant(BinaryOperationFeedback::kSignedSmall));
+    CombineFeedback(var_feedback, BinaryOperationFeedback::kSignedSmall);
     var_result.Bind(SmiSub(SmiConstant(0), smi_value));
     Goto(&end);
 
     BIND(&if_zero);
-    CombineFeedback(var_feedback,
-                    SmiConstant(BinaryOperationFeedback::kNumber));
+    CombineFeedback(var_feedback, BinaryOperationFeedback::kNumber);
     var_result.Bind(MinusZeroConstant());
     Goto(&end);
 
@@ -1412,8 +1342,7 @@ class IncDecAssembler : public UnaryNumericOpAssembler {
     }
 
     BIND(&if_notoverflow);
-    CombineFeedback(var_feedback,
-                    SmiConstant(BinaryOperationFeedback::kSignedSmall));
+    CombineFeedback(var_feedback, BinaryOperationFeedback::kSignedSmall);
     return BitcastWordToTaggedSigned(Projection(0, pair));
   }
 
@@ -2076,11 +2005,11 @@ IGNITION_HANDLER(TestTypeOf, InterpreterAssembler) {
     GotoIf(TaggedIsSmi(object), &if_false);
     // Check if callable bit is set and not undetectable.
     Node* map_bitfield = LoadMapBitField(LoadMap(object));
-    Node* callable_undetectable = Word32And(
-        map_bitfield,
-        Int32Constant(1 << Map::kIsUndetectable | 1 << Map::kIsCallable));
+    Node* callable_undetectable =
+        Word32And(map_bitfield, Int32Constant(Map::IsUndetectableBit::kMask |
+                                              Map::IsCallableBit::kMask));
     Branch(Word32Equal(callable_undetectable,
-                       Int32Constant(1 << Map::kIsCallable)),
+                       Int32Constant(Map::IsCallableBit::kMask)),
            &if_true, &if_false);
   }
   BIND(&if_object);
@@ -2095,9 +2024,9 @@ IGNITION_HANDLER(TestTypeOf, InterpreterAssembler) {
     Node* map = LoadMap(object);
     GotoIfNot(IsJSReceiverMap(map), &if_false);
     Node* map_bitfield = LoadMapBitField(map);
-    Node* callable_undetectable = Word32And(
-        map_bitfield,
-        Int32Constant(1 << Map::kIsUndetectable | 1 << Map::kIsCallable));
+    Node* callable_undetectable =
+        Word32And(map_bitfield, Int32Constant(Map::IsUndetectableBit::kMask |
+                                              Map::IsCallableBit::kMask));
     Branch(Word32Equal(callable_undetectable, Int32Constant(0)), &if_true,
            &if_false);
   }
@@ -2798,7 +2727,7 @@ IGNITION_HANDLER(Throw, InterpreterAssembler) {
   Node* context = GetContext();
   CallRuntime(Runtime::kThrow, context, exception);
   // We shouldn't ever return from a throw.
-  Abort(kUnexpectedReturnFromThrow);
+  Abort(AbortReason::kUnexpectedReturnFromThrow);
 }
 
 // ReThrow
@@ -2809,10 +2738,10 @@ IGNITION_HANDLER(ReThrow, InterpreterAssembler) {
   Node* context = GetContext();
   CallRuntime(Runtime::kReThrow, context, exception);
   // We shouldn't ever return from a throw.
-  Abort(kUnexpectedReturnFromThrow);
+  Abort(AbortReason::kUnexpectedReturnFromThrow);
 }
 
-// Abort <bailout_reason>
+// Abort <abort_reason>
 //
 // Aborts execution (via a call to the runtime function).
 IGNITION_HANDLER(Abort, InterpreterAssembler) {
@@ -2845,7 +2774,7 @@ IGNITION_HANDLER(ThrowReferenceErrorIfHole, InterpreterAssembler) {
     Node* name = LoadConstantPoolEntry(BytecodeOperandIdx(0));
     CallRuntime(Runtime::kThrowReferenceError, GetContext(), name);
     // We shouldn't ever return from a throw.
-    Abort(kUnexpectedReturnFromThrow);
+    Abort(AbortReason::kUnexpectedReturnFromThrow);
   }
 }
 
@@ -2863,7 +2792,7 @@ IGNITION_HANDLER(ThrowSuperNotCalledIfHole, InterpreterAssembler) {
   {
     CallRuntime(Runtime::kThrowSuperNotCalled, GetContext());
     // We shouldn't ever return from a throw.
-    Abort(kUnexpectedReturnFromThrow);
+    Abort(AbortReason::kUnexpectedReturnFromThrow);
   }
 }
 
@@ -2882,7 +2811,7 @@ IGNITION_HANDLER(ThrowSuperAlreadyCalledIfNotHole, InterpreterAssembler) {
   {
     CallRuntime(Runtime::kThrowSuperAlreadyCalledError, GetContext());
     // We shouldn't ever return from a throw.
-    Abort(kUnexpectedReturnFromThrow);
+    Abort(AbortReason::kUnexpectedReturnFromThrow);
   }
 }
 
@@ -3140,29 +3069,19 @@ IGNITION_HANDLER(ExtraWide, InterpreterAssembler) {
 // Illegal
 //
 // An invalid bytecode aborting execution if dispatched.
-IGNITION_HANDLER(Illegal, InterpreterAssembler) { Abort(kInvalidBytecode); }
+IGNITION_HANDLER(Illegal, InterpreterAssembler) {
+  Abort(AbortReason::kInvalidBytecode);
+}
 
 // SuspendGenerator <generator> <first input register> <register count>
 // <suspend_id>
 //
 // Exports the register file and stores it into the generator.  Also stores the
 // current context, |suspend_id|, and the current bytecode offset (for debugging
-// purposes) into the generator.
+// purposes) into the generator. Then, returns the value in the accumulator.
 IGNITION_HANDLER(SuspendGenerator, InterpreterAssembler) {
   Node* generator_reg = BytecodeOperandReg(0);
-
   Node* generator = LoadRegister(generator_reg);
-
-  Label if_stepping(this, Label::kDeferred), ok(this);
-  Node* step_action_address = ExternalConstant(
-      ExternalReference::debug_last_step_action_address(isolate()));
-  Node* step_action = Load(MachineType::Int8(), step_action_address);
-  STATIC_ASSERT(StepIn > StepNext);
-  STATIC_ASSERT(LastStepAction == StepIn);
-  Node* step_next = Int32Constant(StepNext);
-  Branch(Int32LessThanOrEqual(step_next, step_action), &if_stepping, &ok);
-  BIND(&ok);
-
   Node* array =
       LoadObjectField(generator, JSGeneratorObject::kRegisterFileOffset);
   Node* context = GetContext();
@@ -3184,39 +3103,61 @@ IGNITION_HANDLER(SuspendGenerator, InterpreterAssembler) {
   Node* offset = SmiTag(BytecodeOffset());
   StoreObjectField(generator, JSGeneratorObject::kInputOrDebugPosOffset,
                    offset);
-  Dispatch();
 
-  BIND(&if_stepping);
-  {
-    Node* context = GetContext();
-    CallRuntime(Runtime::kDebugRecordGenerator, context, generator);
-    Goto(&ok);
-  }
+  UpdateInterruptBudgetOnReturn();
+  Return(GetAccumulator());
 }
 
-// RestoreGeneratorState <generator>
+// SwitchOnGeneratorState <generator> <table_start> <table_length>
 //
-// Loads the generator's state and stores it in the accumulator,
-// before overwriting it with kGeneratorExecuting.
-IGNITION_HANDLER(RestoreGeneratorState, InterpreterAssembler) {
+// If |generator| is undefined, falls through. Otherwise, loads the
+// generator's state (overwriting it with kGeneratorExecuting), sets the context
+// to the generator's resume context, and performs state dispatch on the
+// generator's state by looking up the generator state in a jump table in the
+// constant pool, starting at |table_start|, and of length |table_length|.
+IGNITION_HANDLER(SwitchOnGeneratorState, InterpreterAssembler) {
   Node* generator_reg = BytecodeOperandReg(0);
   Node* generator = LoadRegister(generator_reg);
 
-  Node* old_state =
-      LoadObjectField(generator, JSGeneratorObject::kContinuationOffset);
-  Node* new_state = Int32Constant(JSGeneratorObject::kGeneratorExecuting);
-  StoreObjectField(generator, JSGeneratorObject::kContinuationOffset,
-                   SmiTag(new_state));
-  SetAccumulator(old_state);
+  Label fallthrough(this);
+  GotoIf(WordEqual(generator, UndefinedConstant()), &fallthrough);
 
+  Node* state =
+      LoadObjectField(generator, JSGeneratorObject::kContinuationOffset);
+  Node* new_state = SmiConstant(JSGeneratorObject::kGeneratorExecuting);
+  StoreObjectField(generator, JSGeneratorObject::kContinuationOffset,
+                   new_state);
+
+  Node* context = LoadObjectField(generator, JSGeneratorObject::kContextOffset);
+  SetContext(context);
+
+  Node* table_start = BytecodeOperandIdx(1);
+  // TODO(leszeks): table_length is only used for a CSA_ASSERT, we don't
+  // actually need it otherwise.
+  Node* table_length = BytecodeOperandUImmWord(2);
+
+  // The state must be a Smi.
+  CSA_ASSERT(this, TaggedIsSmi(state));
+
+  Node* case_value = SmiUntag(state);
+
+  CSA_ASSERT(this, IntPtrGreaterThanOrEqual(case_value, IntPtrConstant(0)));
+  CSA_ASSERT(this, IntPtrLessThan(case_value, table_length));
+  USE(table_length);
+
+  Node* entry = IntPtrAdd(table_start, case_value);
+  Node* relative_jump = LoadAndUntagConstantPoolEntry(entry);
+  Jump(relative_jump);
+
+  BIND(&fallthrough);
   Dispatch();
 }
 
-// RestoreGeneratorRegisters <generator> <first output register> <register
-// count>
+// ResumeGenerator <generator> <first output register> <register count>
 //
-// Imports the register file stored in the generator.
-IGNITION_HANDLER(RestoreGeneratorRegisters, InterpreterAssembler) {
+// Imports the register file stored in the generator and marks the generator
+// state as executing.
+IGNITION_HANDLER(ResumeGenerator, InterpreterAssembler) {
   Node* generator_reg = BytecodeOperandReg(0);
   // Bytecode operand 1 is the start register. It should always be 0, so let's
   // ignore it.
@@ -3230,6 +3171,10 @@ IGNITION_HANDLER(RestoreGeneratorRegisters, InterpreterAssembler) {
   ImportRegisterFile(
       LoadObjectField(generator, JSGeneratorObject::kRegisterFileOffset),
       register_count);
+
+  // Return the generator's input_or_debug_pos in the accumulator.
+  SetAccumulator(
+      LoadObjectField(generator, JSGeneratorObject::kInputOrDebugPosOffset));
 
   Dispatch();
 }

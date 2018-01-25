@@ -89,6 +89,11 @@ TEST(PreParserScopeAnalysis) {
        "get_method();",
        true, true, false},
 
+      // Corner case: function expression with name "arguments".
+      {"var test = function arguments(%s) { %s function skippable() { } };\n"
+       "test;\n",
+       false, false, false}
+
       // FIXME(marja): Generators and async functions
   };
 
@@ -660,11 +665,23 @@ TEST(PreParserScopeAnalysis) {
        [] { i::FLAG_harmony_public_fields = true; },
        [] { i::FLAG_harmony_public_fields = false; }},
       {"class X { static ['foo'] = 2; }; new X;",
-       [] { i::FLAG_harmony_public_fields = true; },
-       [] { i::FLAG_harmony_public_fields = false; }},
+       [] {
+         i::FLAG_harmony_public_fields = true;
+         i::FLAG_harmony_static_fields = true;
+       },
+       [] {
+         i::FLAG_harmony_public_fields = false;
+         i::FLAG_harmony_static_fields = false;
+       }},
       {"class X { ['bar'] = 1; static ['foo'] = 2; }; new X;",
-       [] { i::FLAG_harmony_public_fields = true; },
-       [] { i::FLAG_harmony_public_fields = false; }},
+       [] {
+         i::FLAG_harmony_public_fields = true;
+         i::FLAG_harmony_static_fields = true;
+       },
+       [] {
+         i::FLAG_harmony_public_fields = false;
+         i::FLAG_harmony_static_fields = false;
+       }},
   };
 
   for (unsigned outer_ix = 0; outer_ix < arraysize(outers); ++outer_ix) {

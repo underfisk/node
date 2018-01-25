@@ -182,6 +182,7 @@ constexpr Register arg_reg_4 = rcx;
   V(xmm13)                              \
   V(xmm14)
 
+constexpr bool kPadArguments = false;
 constexpr bool kSimpleFPAliasing = true;
 constexpr bool kSimdMaskRegisters = false;
 
@@ -315,7 +316,7 @@ class Immediate BASE_EMBEDDED {
 
  private:
   int32_t value_;
-  RelocInfo::Mode rmode_ = RelocInfo::NONE32;
+  RelocInfo::Mode rmode_ = RelocInfo::NONE;
 
   friend class Assembler;
 };
@@ -477,10 +478,6 @@ class Assembler : public AssemblerBase {
   static inline void set_target_address_at(
       Isolate* isolate, Address pc, Address constant_pool, Address target,
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
-  static inline Address target_address_at(Address pc, Code* code);
-  static inline void set_target_address_at(
-      Isolate* isolate, Address pc, Code* code, Address target,
-      ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
 
   // Return the code target address at a call site from the return address
   // of that call in the instruction stream.
@@ -496,15 +493,6 @@ class Assembler : public AssemblerBase {
   inline static void deserialization_set_target_internal_reference_at(
       Isolate* isolate, Address pc, Address target,
       RelocInfo::Mode mode = RelocInfo::INTERNAL_REFERENCE);
-
-  static inline RelocInfo::Mode RelocInfoNone() {
-    if (kPointerSize == kInt64Size) {
-      return RelocInfo::NONE64;
-    } else {
-      DCHECK_EQ(kPointerSize, kInt32Size);
-      return RelocInfo::NONE32;
-    }
-  }
 
   inline Handle<Code> code_target_object_handle_at(Address pc);
   inline Address runtime_entry_at(Address pc);
@@ -670,9 +658,9 @@ class Assembler : public AssemblerBase {
 
   // Loads a 64-bit immediate into a register.
   void movq(Register dst, int64_t value,
-            RelocInfo::Mode rmode = RelocInfo::NONE64);
+            RelocInfo::Mode rmode = RelocInfo::NONE);
   void movq(Register dst, uint64_t value,
-            RelocInfo::Mode rmode = RelocInfo::NONE64);
+            RelocInfo::Mode rmode = RelocInfo::NONE);
 
   void movsxbl(Register dst, Register src);
   void movsxbl(Register dst, const Operand& src);
@@ -1211,6 +1199,9 @@ class Assembler : public AssemblerBase {
   void xorpd(XMMRegister dst, const Operand& src);
   void sqrtsd(XMMRegister dst, XMMRegister src);
   void sqrtsd(XMMRegister dst, const Operand& src);
+
+  void haddps(XMMRegister dst, XMMRegister src);
+  void haddps(XMMRegister dst, const Operand& src);
 
   void ucomisd(XMMRegister dst, XMMRegister src);
   void ucomisd(XMMRegister dst, const Operand& src);
@@ -1904,6 +1895,9 @@ class Assembler : public AssemblerBase {
   void rorxq(Register dst, const Operand& src, byte imm8);
   void rorxl(Register dst, Register src, byte imm8);
   void rorxl(Register dst, const Operand& src, byte imm8);
+
+  void lfence();
+  void pause();
 
   // Check the code size generated from label to here.
   int SizeOfCodeGeneratedSince(Label* label) {

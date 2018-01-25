@@ -36,6 +36,7 @@
 #define V8_ASSEMBLER_H_
 
 #include <forward_list>
+#include <iosfwd>
 
 #include "src/allocation.h"
 #include "src/builtins/builtins.h"
@@ -54,9 +55,6 @@ namespace v8 {
 class ApiFunction;
 
 namespace internal {
-namespace wasm {
-class WasmCode;
-}
 
 // Forward declarations.
 class Isolate;
@@ -343,6 +341,12 @@ enum ICacheFlushMode { FLUSH_ICACHE_IF_NEEDED, SKIP_ICACHE_FLUSH };
 
 class RelocInfo {
  public:
+  enum Flag : uint8_t {
+    kNoFlags = 0,
+    kInNativeWasmCode = 1u << 0,  // Reloc info belongs to native wasm code.
+  };
+  typedef base::Flags<Flag> Flags;
+
   // This string is used to add padding comments to the reloc info in cases
   // where we are not sure to have enough space for patching in during
   // lazy deoptimization. This is the case if we have indirect calls for which
@@ -397,8 +401,7 @@ class RelocInfo {
 
     // Pseudo-types
     NUMBER_OF_MODES,
-    NONE32,  // never recorded 32-bit value
-    NONE64,  // never recorded 64-bit value
+    NONE,  // never recorded value
 
     FIRST_REAL_RELOC_MODE = CODE_TARGET,
     LAST_REAL_RELOC_MODE = VENEER_POOL,
@@ -458,9 +461,7 @@ class RelocInfo {
   static inline bool IsInternalReferenceEncoded(Mode mode) {
     return mode == INTERNAL_REFERENCE_ENCODED;
   }
-  static inline bool IsNone(Mode mode) {
-    return mode == NONE32 || mode == NONE64;
-  }
+  static inline bool IsNone(Mode mode) { return mode == NONE; }
   static inline bool IsWasmContextReference(Mode mode) {
     return mode == WASM_CONTEXT_REFERENCE;
   }
@@ -486,6 +487,7 @@ class RelocInfo {
   Mode rmode() const {  return rmode_; }
   intptr_t data() const { return data_; }
   Code* host() const { return host_; }
+  Address constant_pool() const { return constant_pool_; }
 
   // Apply a relocation by delta bytes. When the code object is moved, PC
   // relative addresses have to be updated as well as absolute addresses
@@ -624,12 +626,10 @@ class RelocInfo {
   // comment).
   byte* pc_;
   Mode rmode_;
-  intptr_t data_;
-  // TODO(mtrofin): try remove host_, if all we need is the constant_pool_ or
-  // other few attributes, like start address, etc. This is so that we can reuse
-  // RelocInfo for WasmCode without having a modal design.
+  intptr_t data_ = 0;
   Code* host_;
   Address constant_pool_ = nullptr;
+  Flags flags_;
   friend class RelocIterator;
 };
 
@@ -639,7 +639,6 @@ class RelocInfo {
 class RelocInfoWriter BASE_EMBEDDED {
  public:
   RelocInfoWriter() : pos_(nullptr), last_pc_(nullptr) {}
-  RelocInfoWriter(byte* pos, byte* pc) : pos_(pos), last_pc_(pc) {}
 
   byte* pos() const { return pos_; }
   byte* last_pc() const { return last_pc_; }
@@ -655,10 +654,7 @@ class RelocInfoWriter BASE_EMBEDDED {
 
   // Max size (bytes) of a written RelocInfo. Longest encoding is
   // ExtraTag, VariableLengthPCJump, ExtraTag, pc_delta, data_delta.
-  // On ia32 and arm this is 1 + 4 + 1 + 1 + 4 = 11.
-  // On x64 this is 1 + 4 + 1 + 1 + 8 == 15;
-  // Here we use the maximum of the two.
-  static const int kMaxSize = 15;
+  static constexpr int kMaxSize = 1 + 4 + 1 + 1 + kPointerSize;
 
  private:
   inline uint32_t WriteLongPCJump(uint32_t pc_delta);
@@ -673,7 +669,6 @@ class RelocInfoWriter BASE_EMBEDDED {
 
   byte* pos_;
   byte* last_pc_;
-  RelocInfo::Mode last_mode_;
 
   DISALLOW_COPY_AND_ASSIGN(RelocInfoWriter);
 };
@@ -737,8 +732,9 @@ class RelocIterator: public Malloced {
   const byte* pos_;
   const byte* end_;
   RelocInfo rinfo_;
-  bool done_;
-  int mode_mask_;
+  bool done_ = false;
+  const int mode_mask_;
+
   DISALLOW_COPY_AND_ASSIGN(RelocIterator);
 };
 
@@ -830,6 +826,9 @@ class ExternalReference BASE_EMBEDDED {
   // The builtins table as an external reference, used by lazy deserialization.
   static ExternalReference builtins_address(Isolate* isolate);
 
+  static ExternalReference handle_scope_implementer_address(Isolate* isolate);
+  static ExternalReference pending_microtask_count_address(Isolate* isolate);
+
   // One-of-a-kind references. These references are not part of a general
   // pattern. This means that they have to be added to the
   // ExternalReferenceTable in serialize.cc manually.
@@ -875,6 +874,8 @@ class ExternalReference BASE_EMBEDDED {
   static ExternalReference wasm_word64_ctz(Isolate* isolate);
   static ExternalReference wasm_word32_popcnt(Isolate* isolate);
   static ExternalReference wasm_word64_popcnt(Isolate* isolate);
+  static ExternalReference wasm_word32_rol(Isolate* isolate);
+  static ExternalReference wasm_word32_ror(Isolate* isolate);
   static ExternalReference wasm_float64_pow(Isolate* isolate);
   static ExternalReference wasm_set_thread_in_wasm_flag(Isolate* isolate);
   static ExternalReference wasm_clear_thread_in_wasm_flag(Isolate* isolate);
@@ -1017,6 +1018,9 @@ class ExternalReference BASE_EMBEDDED {
       Isolate* isolate);
 
   V8_EXPORT_PRIVATE static ExternalReference runtime_function_table_address(
+      Isolate* isolate);
+
+  static ExternalReference invalidate_prototype_chains_function(
       Isolate* isolate);
 
   Address address() const { return reinterpret_cast<Address>(address_); }
@@ -1328,15 +1332,23 @@ class RegisterBase {
 
   int bit() const { return 1 << code(); }
 
-  inline bool operator==(SubType other) const {
+  inline constexpr bool operator==(SubType other) const {
     return reg_code_ == other.reg_code_;
   }
-  inline bool operator!=(SubType other) const { return !(*this == other); }
+  inline constexpr bool operator!=(SubType other) const {
+    return reg_code_ != other.reg_code_;
+  }
 
  protected:
   explicit constexpr RegisterBase(int code) : reg_code_(code) {}
   int reg_code_;
 };
+
+template <typename SubType, int kAfterLastRegister>
+inline std::ostream& operator<<(std::ostream& os,
+                                RegisterBase<SubType, kAfterLastRegister> reg) {
+  return reg.is_valid() ? os << "r" << reg.code() : os << "<invalid reg>";
+}
 
 }  // namespace internal
 }  // namespace v8

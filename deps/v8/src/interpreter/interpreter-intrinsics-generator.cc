@@ -107,7 +107,7 @@ Node* IntrinsicsGenerator::InvokeIntrinsic(Node* function_id, Node* context,
 
   __ BIND(&abort);
   {
-    __ Abort(BailoutReason::kUnexpectedFunctionIDForInvokeIntrinsic);
+    __ Abort(AbortReason::kUnexpectedFunctionIDForInvokeIntrinsic);
     result.Bind(__ UndefinedConstant());
     __ Goto(&end);
   }
@@ -331,7 +331,7 @@ Node* IntrinsicsGenerator::Call(Node* args_reg, Node* arg_count,
     InterpreterAssembler::Label arg_count_positive(assembler_);
     Node* comparison = __ Int32LessThan(target_args_count, __ Int32Constant(0));
     __ GotoIfNot(comparison, &arg_count_positive);
-    __ Abort(kWrongArgumentCountForInvokeIntrinsic);
+    __ Abort(AbortReason::kWrongArgumentCountForInvokeIntrinsic);
     __ Goto(&arg_count_positive);
     __ BIND(&arg_count_positive);
   }
@@ -389,15 +389,6 @@ Node* IntrinsicsGenerator::CreateJSGeneratorObject(Node* input, Node* arg_count,
                                                    Node* context) {
   return IntrinsicAsBuiltinCall(input, context,
                                 Builtins::kCreateGeneratorObject);
-}
-
-Node* IntrinsicsGenerator::GeneratorGetContext(Node* args_reg, Node* arg_count,
-                                               Node* context) {
-  Node* generator = __ LoadRegister(args_reg);
-  Node* const value =
-      __ LoadObjectField(generator, JSGeneratorObject::kContextOffset);
-
-  return value;
 }
 
 Node* IntrinsicsGenerator::GeneratorGetInputOrDebugPos(Node* args_reg,
@@ -472,7 +463,7 @@ void IntrinsicsGenerator::AbortIfArgCountMismatch(int expected, Node* actual) {
   InterpreterAssembler::Label match(assembler_);
   Node* comparison = __ Word32Equal(actual, __ Int32Constant(expected));
   __ GotoIf(comparison, &match);
-  __ Abort(kWrongArgumentCountForInvokeIntrinsic);
+  __ Abort(AbortReason::kWrongArgumentCountForInvokeIntrinsic);
   __ Goto(&match);
   __ BIND(&match);
 }

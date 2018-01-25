@@ -42,10 +42,7 @@ namespace interpreter {
   V(LdaGlobal, AccumulatorUse::kWrite, OperandType::kIdx, OperandType::kIdx)   \
   V(LdaGlobalInsideTypeof, AccumulatorUse::kWrite, OperandType::kIdx,          \
     OperandType::kIdx)                                                         \
-  V(StaGlobalSloppy, AccumulatorUse::kRead, OperandType::kIdx,                 \
-    OperandType::kIdx)                                                         \
-  V(StaGlobalStrict, AccumulatorUse::kRead, OperandType::kIdx,                 \
-    OperandType::kIdx)                                                         \
+  V(StaGlobal, AccumulatorUse::kRead, OperandType::kIdx, OperandType::kIdx)    \
                                                                                \
   /* Context operations */                                                     \
   V(PushContext, AccumulatorUse::kRead, OperandType::kRegOut)                  \
@@ -317,10 +314,11 @@ namespace interpreter {
   V(ThrowSuperAlreadyCalledIfNotHole, AccumulatorUse::kRead)                   \
                                                                                \
   /* Generators */                                                             \
-  V(RestoreGeneratorState, AccumulatorUse::kWrite, OperandType::kReg)          \
-  V(SuspendGenerator, AccumulatorUse::kNone, OperandType::kReg,                \
+  V(SwitchOnGeneratorState, AccumulatorUse::kNone, OperandType::kReg,          \
+    OperandType::kIdx, OperandType::kUImm)                                     \
+  V(SuspendGenerator, AccumulatorUse::kRead, OperandType::kReg,                \
     OperandType::kRegList, OperandType::kRegCount, OperandType::kUImm)         \
-  V(RestoreGeneratorRegisters, AccumulatorUse::kNone, OperandType::kReg,       \
+  V(ResumeGenerator, AccumulatorUse::kWrite, OperandType::kReg,                \
     OperandType::kRegOutList, OperandType::kRegCount)                          \
                                                                                \
   /* Debugger */                                                               \
@@ -434,6 +432,10 @@ namespace interpreter {
 #define JUMP_BYTECODE_LIST(V)   \
   JUMP_FORWARD_BYTECODE_LIST(V) \
   V(JumpLoop)
+
+#define RETURN_BYTECODE_LIST(V) \
+  V(Return)                     \
+  V(SuspendGenerator)
 
 // Enumeration of interpreter bytecodes.
 enum class Bytecode : uint8_t {
@@ -616,11 +618,6 @@ class V8_EXPORT_PRIVATE Bytecodes final : public AllStatic {
            bytecode <= Bytecode::kJumpIfJSReceiver;
   }
 
-  // Returns true if the bytecode is a conditional jump, a jump, or a return.
-  static constexpr bool IsJumpOrReturn(Bytecode bytecode) {
-    return bytecode == Bytecode::kReturn || IsJump(bytecode);
-  }
-
   // Return true if |bytecode| is a jump without effects,
   // e.g.  any jump excluding those that include type coercion like
   // JumpIfTrueToBoolean.
@@ -630,7 +627,8 @@ class V8_EXPORT_PRIVATE Bytecodes final : public AllStatic {
 
   // Returns true if the bytecode is a switch.
   static constexpr bool IsSwitch(Bytecode bytecode) {
-    return bytecode == Bytecode::kSwitchOnSmiNoFeedback;
+    return bytecode == Bytecode::kSwitchOnSmiNoFeedback ||
+           bytecode == Bytecode::kSwitchOnGeneratorState;
   }
 
   // Returns true if |bytecode| has no effects. These bytecodes only manipulate
@@ -684,9 +682,16 @@ class V8_EXPORT_PRIVATE Bytecodes final : public AllStatic {
     return true;
   }
 
+  // Returns true if the bytecode returns.
+  static constexpr bool Returns(Bytecode bytecode) {
+#define OR_BYTECODE(NAME) || bytecode == Bytecode::k##NAME
+    return false RETURN_BYTECODE_LIST(OR_BYTECODE);
+#undef OR_BYTECODE
+  }
+
   // Returns the number of values which |bytecode| returns.
   static constexpr size_t ReturnCount(Bytecode bytecode) {
-    return bytecode == Bytecode::kReturn ? 1 : 0;
+    return Returns(bytecode) ? 1 : 0;
   }
 
   // Returns the number of operands expected by |bytecode|.
